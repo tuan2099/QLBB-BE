@@ -22,6 +22,7 @@ const StockTransfer = require('./stockTransfer')(sequelize, DataTypes);
 const StockTransferItem = require('./stockTransferItem')(sequelize, DataTypes);
 const StockTake = require('./stockTake')(sequelize, DataTypes);
 const StockTakeItem = require('./stockTakeItem')(sequelize, DataTypes);
+const Setting = require('./setting')(sequelize, DataTypes);
 
 // Associations
 User.belongsToMany(Role, { through: UserRole, foreignKey: 'user_id' });
@@ -126,4 +127,5 @@ module.exports = {
   StockTransferItem,
   StockTake,
   StockTakeItem,
+  Setting,
 };

@@ -1,6 +1,7 @@
-'use strict';
+"use strict";
 const { Op } = require('sequelize');
-const { sequelize, StockIn, StockInItem, InventoryBalance, Warehouse, Supplier, Product } = require('../models');
+const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType } = require('docx');
+const { sequelize, StockIn, StockInItem, InventoryBalance, Warehouse, Supplier, Product, User } = require('../models');
 
 const list = async (req, res) => {
   const {
@@ -33,7 +34,7 @@ const list = async (req, res) => {
     const where = { ...baseWhere, deleted_at: { [Op.ne]: null } };
     ({ rows, count } = await StockIn.findAndCountAll({
       where,
-      include: [Warehouse, Supplier],
+      include: [Warehouse, Supplier, User],
       order: [['created_at', 'DESC']],
       offset,
       limit: limitNum,
@@ -43,7 +44,7 @@ const list = async (req, res) => {
     const where = { ...baseWhere };
     ({ rows, count } = await StockIn.findAndCountAll({
       where,
-      include: [Warehouse, Supplier],
+      include: [Warehouse, Supplier, User],
       order: [['created_at', 'DESC']],
       offset,
       limit: limitNum,
@@ -67,6 +68,7 @@ const getById = async (req, res) => {
     include: [
       Warehouse,
       Supplier,
+      User,
       {
         model: StockInItem,
         include: [Product],
@@ -150,6 +152,7 @@ const create = async (req, res) => {
       include: [
         Warehouse,
         Supplier,
+        User,
         { model: StockInItem, include: [Product] },
       ],
     });
@@ -331,6 +334,7 @@ const update = async (req, res) => {
       include: [
         Warehouse,
         Supplier,
+        User,
         { model: StockInItem, include: [Product] },
       ],
     });
@@ -439,6 +443,110 @@ const confirm = async (req, res) => {
   }
 };
 
+const exportWord = async (req, res) => {
+  const id = req.params.id;
+
+  try {
+    const stockIn = await StockIn.findByPk(id, {
+      include: [
+        Warehouse,
+        Supplier,
+        User,
+        {
+          model: StockInItem,
+          include: [Product],
+        },
+      ],
+    });
+
+    if (!stockIn) {
+      return res.status(404).json({ message: "Stock-in not found" });
+    }
+
+    const doc = new Document({
+      sections: [
+        {
+          properties: {},
+          children: [
+            new Paragraph({
+              children: [
+                new TextRun({ text: "PHIẾU NHẬP KHO", bold: true, size: 32 }),
+              ],
+            }),
+            new Paragraph({ text: "" }),
+            new Paragraph({ text: `Mã phiếu: ${stockIn.code}` }),
+            new Paragraph({
+              text: `Kho: ${
+                stockIn.Warehouse?.name || stockIn.Warehouse?.code || stockIn.Warehouse?.id || ""
+              }`,
+            }),
+            new Paragraph({
+              text: `Nhà cung cấp: ${
+                stockIn.Supplier?.name || stockIn.Supplier?.code || stockIn.Supplier?.id || "-"
+              }`,
+            }),
+            new Paragraph({
+              text: `Người tạo: ${stockIn.User?.username || "-"}`,
+            }),
+            new Paragraph({ text: "" }),
+            new Table({
+              width: { size: 100, type: WidthType.PERCENTAGE },
+              rows: [
+                new TableRow({
+                  children: [
+                    new TableCell({ children: [new Paragraph("STT")] }),
+                    new TableCell({ children: [new Paragraph("Sản phẩm")] }),
+                    new TableCell({ children: [new Paragraph("Mã SKU")] }),
+                    new TableCell({ children: [new Paragraph("Số lượng")] }),
+                  ],
+                }),
+                ...(stockIn.StockInItems || []).map((item, index) =>
+                  new TableRow({
+                    children: [
+                      new TableCell({ children: [new Paragraph(String(index + 1))] }),
+                      new TableCell({
+                        children: [
+                          new Paragraph(item.Product?.name || `#${item.product_id}`),
+                        ],
+                      }),
+                      new TableCell({
+                        children: [
+                          new Paragraph(item.Product?.sku || ""),
+                        ],
+                      }),
+                      new TableCell({
+                        children: [
+                          new Paragraph(String(item.quantity)),
+                        ],
+                      }),
+                    ],
+                  })
+                ),
+              ],
+            }),
+          ],
+        },
+      ],
+    });
+
+    const buffer = await Packer.toBuffer(doc);
+
+    const filename = `stock-in-${stockIn.code || id}.docx`;
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    );
+    res.setHeader("Content-Disposition", `attachment; filename=\"${filename}\"`);
+
+    return res.send(buffer);
+  } catch (error) {
+    // eslint-disable-next-line no-console
+    console.error("Export stock-in to Word failed", error);
+    return res.status(500).json({ message: "Internal server error" });
+  }
+};
+
 module.exports = {
   list,
   getById,
@@ -447,4 +555,5 @@ module.exports = {
   remove,
   confirm,
   permanentRemove,
+  exportWord,
 };

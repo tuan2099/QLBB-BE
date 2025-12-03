@@ -7,6 +7,12 @@ const stockOutController = require('../controllers/stockOut.controller');
 // Authenticated inventory operations
 router.get('/', authenticate, requirePermission('inventory.read'), stockOutController.list);
 router.get('/:id', authenticate, requirePermission('inventory.read'), stockOutController.getById);
+router.get(
+  '/:id/export-word',
+  authenticate,
+  requirePermission('inventory.read'),
+  stockOutController.exportWord
+);
 router.post('/', authenticate, requirePermission('inventory.create'), stockOutController.create);
 router.put('/:id', authenticate, requirePermission('inventory.update'), stockOutController.update);
 router.delete('/:id', authenticate, requirePermission('inventory.delete'), stockOutController.remove);

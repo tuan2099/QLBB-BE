@@ -1,9 +1,10 @@
-'use strict';
+"use strict";
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { Op } = require('sequelize');
-const { sequelize, StockOut, StockOutItem, InventoryBalance, Warehouse, Customer, Product } = require('../models');
+const { Document, Packer, Paragraph, TextRun, Table, TableRow, TableCell, WidthType } = require('docx');
+const { sequelize, StockOut, StockOutItem, InventoryBalance, Warehouse, Customer, Product, User } = require('../models');
 const { sendMail } = require('../services/email.service');
 
 const list = async (req, res) => {
@@ -14,25 +15,46 @@ const list = async (req, res) => {
     customer_id,
     status,
     code,
+    deleted,
   } = req.query;
 
-  const where = {};
-  if (warehouse_id) where.warehouse_id = warehouse_id;
-  if (customer_id) where.customer_id = customer_id;
-  if (status) where.status = status;
-  if (code) where.code = { [Op.like]: `%${code}%` };
+  const baseWhere = {};
+  if (warehouse_id) baseWhere.warehouse_id = warehouse_id;
+  if (customer_id) baseWhere.customer_id = customer_id;
+  if (status) baseWhere.status = status;
+  if (code) baseWhere.code = { [Op.like]: `%${code}%` };
 
   const pageNum = Math.max(Number(page) || 1, 1);
   const limitNum = Math.max(Number(limit) || 20, 1);
   const offset = (pageNum - 1) * limitNum;
 
-  const { rows, count } = await StockOut.findAndCountAll({
-    where,
-    include: [Warehouse, Customer],
-    order: [['created_at', 'DESC']],
-    offset,
-    limit: limitNum,
-  });
+  const isDeletedList =
+    deleted === '1' || deleted === 1 || deleted === true || deleted === 'true';
+
+  let rows;
+  let count;
+
+  if (isDeletedList) {
+    const where = { ...baseWhere, deleted_at: { [Op.ne]: null } };
+    ({ rows, count } = await StockOut.findAndCountAll({
+      where,
+      include: [Warehouse, Customer, User],
+      order: [['created_at', 'DESC']],
+      offset,
+      limit: limitNum,
+      paranoid: false,
+    }));
+  } else {
+    const where = { ...baseWhere };
+    ({ rows, count } = await StockOut.findAndCountAll({
+      where,
+      include: [Warehouse, Customer, User],
+      order: [['created_at', 'DESC']],
+      offset,
+      limit: limitNum,
+      // dùng paranoid mặc định: tự loại bản ghi đã xoá mềm
+    }));
+  }
 
   return res.json({
     data: rows,
@@ -50,6 +72,7 @@ const getById = async (req, res) => {
     include: [
       Warehouse,
       Customer,
+      User,
       {
         model: StockOutItem,
         include: [Product],
@@ -149,6 +172,7 @@ const create = async (req, res) => {
       include: [
         Warehouse,
         Customer,
+        User,
         { model: StockOutItem, include: [Product] },
       ],
     });
@@ -385,29 +409,19 @@ const permanentRemove = async (req, res) => {
       return res.status(404).json({ message: 'Stock-out not found' });
     }
 
+    // Chỉ cho xoá hẳn khi đã xoá mềm trước đó
     if (!stockOut.deleted_at && !stockOut.deletedAt) {
       await t.rollback();
       return res.status(400).json({ message: 'Cần xoá mềm trước khi xoá vĩnh viễn' });
     }
 
-    const warehouseId = stockOut.warehouse_id;
-
-    // Rollback tồn kho: cộng trả lại số đã xuất
-    for (const item of stockOut.StockOutItems) {
-      const { product_id, quantity } = item;
-
-      const [balance] = await InventoryBalance.findOrCreate({
-        where: { warehouse_id: warehouseId, product_id },
-        defaults: { quantity: 0 },
-        transaction: t,
-        lock: t.LOCK.UPDATE,
-      });
-
-      balance.quantity = Number(balance.quantity) + Number(quantity);
-      await balance.save({ transaction: t });
-    }
-
-    await StockOutItem.destroy({ where: { stock_out_id: stockOut.id }, transaction: t, force: true, paranoid: false });
+    // Tồn kho đã được rollback (nếu cần) ở bước xoá mềm, nên ở đây chỉ dọn dữ liệu
+    await StockOutItem.destroy({
+      where: { stock_out_id: stockOut.id },
+      transaction: t,
+      force: true,
+      paranoid: false,
+    });
     await stockOut.destroy({ transaction: t, force: true });
 
     await t.commit();
@@ -552,11 +566,28 @@ const remove = async (req, res) => {
     }
 
     if (stockOut.status === 'draft') {
-      // Draft: xoá hẳn không ảnh hưởng tồn kho
+      // Draft: xoá hẳn không ảnh hưởng tồn kho (vì chưa xuất thực tế)
       await StockOutItem.destroy({ where: { stock_out_id: stockOut.id }, transaction: t, force: true });
       await stockOut.destroy({ transaction: t, force: true });
     } else {
-      // Confirmed/cancelled: xoá mềm, không rollback tồn
+      // Phiếu đã confirmed/cancelled: rollback tồn kho rồi xoá mềm
+      const warehouseId = stockOut.warehouse_id;
+
+      for (const item of stockOut.StockOutItems) {
+        const { product_id, quantity } = item;
+
+        const [balance] = await InventoryBalance.findOrCreate({
+          where: { warehouse_id: warehouseId, product_id },
+          defaults: { quantity: 0 },
+          transaction: t,
+          lock: t.LOCK.UPDATE,
+        });
+
+        balance.quantity = Number(balance.quantity) + Number(quantity);
+        await balance.save({ transaction: t });
+      }
+
+      // Xoá mềm header (và chi tiết nếu muốn ẩn khỏi báo cáo chi tiết)
       await StockOutItem.destroy({ where: { stock_out_id: stockOut.id }, transaction: t });
       await stockOut.destroy({ transaction: t });
     }
@@ -640,6 +671,115 @@ const confirm = async (req, res) => {
   }
 };
 
+const exportWord = async (req, res) => {
+  const id = req.params.id;
+
+  try {
+    const stockOut = await StockOut.findByPk(id, {
+      include: [
+        Warehouse,
+        Customer,
+        User,
+        {
+          model: StockOutItem,
+          include: [Product],
+        },
+      ],
+    });
+
+    if (!stockOut) {
+      return res.status(404).json({ message: 'Stock-out not found' });
+    }
+
+    const doc = new Document({
+      sections: [
+        {
+          properties: {},
+          children: [
+            new Paragraph({
+              children: [
+                new TextRun({ text: 'PHIẾU XUẤT KHO', bold: true, size: 32 }),
+              ],
+            }),
+            new Paragraph({ text: '' }),
+            new Paragraph({ text: `Mã phiếu: ${stockOut.code}` }),
+            new Paragraph({
+              text: `Kho xuất: ${
+                stockOut.Warehouse?.name || stockOut.Warehouse?.code || stockOut.Warehouse?.id || ''
+              }`,
+            }),
+            new Paragraph({
+              text: `Khách hàng: ${
+                stockOut.Customer?.name || stockOut.Customer?.code || stockOut.Customer?.id || '-'
+              }`,
+            }),
+            new Paragraph({
+              text: `Người tạo: ${stockOut.User?.username || '-'}`,
+            }),
+            new Paragraph({
+              text: `Người nhận hàng: ${stockOut.receiver_name || '-'}`,
+            }),
+            new Paragraph({
+              text: `Email người nhận: ${stockOut.receiver_email || '-'}`,
+            }),
+            new Paragraph({ text: '' }),
+            new Table({
+              width: { size: 100, type: WidthType.PERCENTAGE },
+              rows: [
+                new TableRow({
+                  children: [
+                    new TableCell({ children: [new Paragraph('STT')] }),
+                    new TableCell({ children: [new Paragraph('Sản phẩm')] }),
+                    new TableCell({ children: [new Paragraph('Mã SKU')] }),
+                    new TableCell({ children: [new Paragraph('Số lượng')] }),
+                  ],
+                }),
+                ...(stockOut.StockOutItems || []).map((item, index) =>
+                  new TableRow({
+                    children: [
+                      new TableCell({ children: [new Paragraph(String(index + 1))] }),
+                      new TableCell({
+                        children: [
+                          new Paragraph(item.Product?.name || `#${item.product_id}`),
+                        ],
+                      }),
+                      new TableCell({
+                        children: [
+                          new Paragraph(item.Product?.sku || ''),
+                        ],
+                      }),
+                      new TableCell({
+                        children: [
+                          new Paragraph(String(item.quantity)),
+                        ],
+                      }),
+                    ],
+                  })
+                ),
+              ],
+            }),
+          ],
+        },
+      ],
+    });
+
+    const buffer = await Packer.toBuffer(doc);
+
+    const filename = `stock-out-${stockOut.code || id}.docx`;
+
+    res.setHeader(
+      'Content-Type',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    );
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+
+    return res.send(buffer);
+  } catch (error) {
+    console.error('Export stock-out to Word failed', error);
+    return res.status(500).json({ message: 'Internal server error' });
+  }
+};
+
 module.exports = {
   list,
   getById,
@@ -652,4 +792,5 @@ module.exports = {
   receiveSignByToken,
   receiveSignOnsite,
   permanentRemove,
+  exportWord,
 };
