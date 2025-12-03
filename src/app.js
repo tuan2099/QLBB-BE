@@ -5,6 +5,7 @@ const cors = require('cors');
 const path = require('path');
 const { sequelize } = require('./models');
 const activityLogger = require('./middlewares/activityLog.middleware');
+const { scheduleInventoryReports } = require('./jobs/reportEmail.scheduler');
 
 const app = express();
 
@@ -24,6 +25,7 @@ const rbacRoutes = require('./routes/rbac.routes');
 const roleRoutes = require('./routes/role.routes');
 const permissionRoutes = require('./routes/permission.routes');
 const activityLogRoutes = require('./routes/activityLog.routes');
+const settingRoutes = require('./routes/setting.routes');
 app.use('/auth', authRoutes);
 app.use('/inventory', inventoryRoutes);
 app.use('/users', userRoutes);
@@ -32,6 +34,7 @@ app.use('/rbac', rbacRoutes);
 app.use('/roles', roleRoutes);
 app.use('/permissions', permissionRoutes);
 app.use('/activity-logs', activityLogRoutes);
+app.use('/settings', settingRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
@@ -45,6 +48,8 @@ const PORT = process.env.PORT || 3000;
     await sequelize.authenticate();
     await sequelize.sync();
     console.log('Database connected and models synced');
+
+    scheduleInventoryReports();
 
     app.listen(PORT, () => {
       console.log(`Server is running on port ${PORT}`);

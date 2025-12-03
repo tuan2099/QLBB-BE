@@ -6,6 +6,12 @@ const stockInController = require('../controllers/stockIn.controller');
 
 router.get('/', authenticate, requirePermission('inventory.read'), stockInController.list);
 router.get('/:id', authenticate, requirePermission('inventory.read'), stockInController.getById);
+router.get(
+  '/:id/export-word',
+  authenticate,
+  requirePermission('inventory.read'),
+  stockInController.exportWord
+);
 router.post('/', authenticate, requirePermission('inventory.create'), stockInController.create);
 router.put('/:id', authenticate, requirePermission('inventory.update'), stockInController.update);
 router.delete('/:id', authenticate, requirePermission('inventory.delete'), stockInController.remove);
